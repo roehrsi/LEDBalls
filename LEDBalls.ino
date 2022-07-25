@@ -1,9 +1,12 @@
 #include <FastLED.h>
+#include <AceSorting.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/touch_pad.h"
 #include "esp_log.h"
+
+using ace_sorting::shellSortKnuth;
 
 #define NUM_STRIPS 10                                 // Number of strips used
 #define NUM_LEDS_PER_STRIP 5                          // The LEDs per strip
@@ -11,16 +14,16 @@
 
 #define COLOR_ORDER GRB            // Order of RGB on your strips
 #define CHIPSET     WS2811         // Select your LED chipset
-#define BRIGHTNESS  90             // Master brightness
+#define BRIGHTNESS  70             // Master brightness
 
-#define FRAMES_PER_SECOND 30       // The updates per second on the LED data
+#define FRAMES_PER_SECOND 60       // The updates per second on the LED data
 
 int touchSensorValues[10] = {};       // The touch sensor init
-int touchSensorThresholds[10] = {6, 18, 8, 16, 11, 25, 18, 13, 10, 7};   // The thresholds for sensing capacitance changes. Will be adjusted during setup.
+int touchSensorThresholds[10] = {6, 18, 8, 16, 11, 25, 18, 11, 10, 7};   // The thresholds for sensing capacitance changes. Will be adjusted during setup.
 #define THRESHOLD_SAMPLE_SIZE 10          // For calibrating the thresholds
 #define THRESHOLD_FRAC 4                  // Set this to the fraction of the calibrated capacitance at which to fire a touch input, e.g. "3" for firing at dropping 1/3rd of cap value.
-unsigned long startTimers[10] = {};             // This gets filled with the current machine time
-#define ACTION_TIMER 3                    // Seconds to block additional touch input, so we don't trigger continuously
+unsigned long startTimers[NUM_STRIPS];             // This gets filled with the current machine time
+#define ACTION_TIMER 5                    // Seconds to block additional touch input, so we don't trigger continuously
 
 
 CRGB leds[NUM_LEDS];                                          // One array for all strips. This will be offset to partition the individual orbs.
@@ -28,7 +31,7 @@ CLEDController *controllers[NUM_STRIPS];
 constexpr int ledPins[10] = {16,17,5,18,19,21,22,23,25,26};   // Define all the used pins for data ...
 constexpr int touchPins[10] = {4,14,2,15,13,12,14,27,33,32};  // ...and touch control. All indeces must line up across all the arrays. 
                                                               // IMPORTANT NOTE: GPIO0, while being touch capable in theory, is tied to boot button and led and is therefore not available on some boards.
-uint8_t gBrightness = 128;                                    // For master brightness across multiple controllers
+int gCurrentBrightness[NUM_STRIPS];
 TBlendType currentBlending = LINEARBLEND;
 uint8_t thisdelay = 20;
 
@@ -45,9 +48,14 @@ bool gReverseDirection = true;               // For fire animation
 // Set up the palettes for each pin. Default to black. This is kinda ugly...
 CRGBPalette16 currentPalettes[10] = {CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), 
         CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black)};
+
 CRGBPalette16 targetPalettes[10] = {gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)], 
         gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)], 
         gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)], gGradientPalettes[random8(gGradientPaletteCount)]};
+        
+// uint8_t pal = 5;
+// CRGBPalette16 targetPalettes[10] = {gGradientPalettes[pal], gGradientPalettes[pal], gGradientPalettes[pal], gGradientPalettes[pal], gGradientPalettes[pal], 
+// gGradientPalettes[pal], gGradientPalettes[pal], gGradientPalettes[pal], gGradientPalettes[pal], gGradientPalettes[pal]};
 
 // Setup LEDs 
 void setup() { 
@@ -71,61 +79,100 @@ void setup() {
 
   FastLED.setBrightness(BRIGHTNESS);
 
-  // int adjValue;
-  // Serial.println("Calibrating capacitive thresholds...");
-  // for(int i = 0; i < NUM_STRIPS; i++) {                                                 // We calibrate touch sensor thresholds for every pin before startup
-  //   for (int j = 0; j < THRESHOLD_SAMPLE_SIZE; j++) {
-  //     adjValue += touchRead(touchPins[i]);                                              // Get an average sample over a few iterations to smooth out spikes in readings
-  //     delay(10);
-  //   }
-  //   adjValue = adjValue / THRESHOLD_SAMPLE_SIZE; 
-  //   touchSensorThresholds[i] = adjValue * (THRESHOLD_FRAC - 1) / THRESHOLD_FRAC;        // The threshold shall be a fraction of the averaged neutral state value
-  // }
+  // touch_pad_init();
+  // touch_pad_filter_start();
+  // touch_pad_filter_set_period(1000);
+  
+  int adjValues[THRESHOLD_SAMPLE_SIZE];
+  int adjValue;
+  int adjValueSize = 0;
+  Serial.println("Calibrating capacitive thresholds...");
+  for(int i = 0; i < NUM_STRIPS; i++) {                                                 // We calibrate touch sensor thresholds for every pin before startup
+    for (int j = 0; j < THRESHOLD_SAMPLE_SIZE; j++) {
+      adjValues[j] = touchRead(touchPins[i]);                                           // Get median sample over a few iterations to smooth out spikes in readings
+      delay(10);
+    }
+    shellSortKnuth(adjValues, THRESHOLD_SAMPLE_SIZE);                                   
+    adjValue = adjValues[THRESHOLD_SAMPLE_SIZE / 2];
+    touchSensorThresholds[i] = adjValue * (THRESHOLD_FRAC - 1) / THRESHOLD_FRAC;        // The threshold shall be a fraction of the averaged neutral state value
+  }
 
-  // Serial.println("\n Calibration done...");
-  // Serial.print("Thresholds calbrated to:: ");
-  // for (int i = 0; i < 10; i++) {
-  //   Serial.print(touchSensorThresholds[i]);
-  //   Serial.print("|");
-  // }
-  // Serial.println("");
+  Serial.println("\n Calibration done...");
+  Serial.print("Thresholds calbrated to:: ");
+  for (int i = 0; i < 10; i++) {
+    Serial.print(touchSensorThresholds[i]);
+    Serial.print("|");
+  }
+  Serial.println("");
 
 }
 
+uint8_t readingA = 0;
+uint8_t readingB = 0;
 // The main loop 
 void loop() {
-  random16_add_entropy(random());
-  
-  for (int i = 0; i < 10; i++) {                                                                // Read all the touch pin values
-    touchSensorValues[i] = touchRead(touchPins[i]);
-    if (touchSensorValues[i] < touchSensorThresholds[i]) {                                      // Check thresholds                                                             // Delay inputs with ACTION_TIMER
-        if (millis() - startTimers[i] > ACTION_TIMER * 1000) {
-          startTimers[i] = millis();
-          Serial.print("Touch detected on pin ");
-          Serial.println(i);
-          gCurrentPaletteNumbers[i] = random8(gGradientPaletteCount);                             // Set new palette to a random selection out of registered palettes
-          targetPalettes[i] = gGradientPalettes[gCurrentPaletteNumbers[i]];                       // transition to new palette.
+  random16_add_entropy(random(53585));
+
+  for (int i = 0; i < 10; i++) {
+    // TouchRead sometimes produces unstable readings during idle operation which can trigger input by accident.
+    // We take a series of readings and only use the largest one to circumvent this issue.
+    readingA = touchRead(touchPins[i]);
+    for (int j = 0; j < 5; j++) {
+      readingB = touchRead(touchPins[i]);                                                   
+      if (readingB > readingA) {readingA = readingB;}
+    }
+    touchSensorValues[i] = readingA;
+    if (touchSensorValues[i] > 0 && touchSensorValues[i] < touchSensorThresholds[i]) {            // Check thresholds                                                             
+      // Delay period via ACTION_TIMER
+      if (millis() - startTimers[i] > ACTION_TIMER * 1000) {
+        Serial.print("Touch detected on pin ");
+        Serial.print(i);
+        Serial.print(" _ Value: ");
+        Serial.println(touchSensorValues[i]);
+        
+        startTimers[i] = millis();
+        gCurrentPaletteNumbers[i] = random8(gGradientPaletteCount);                             // Set new palette to a random selection out of registered palettes
+        targetPalettes[i] = gGradientPalettes[gCurrentPaletteNumbers[i]];                       // transition to new palette.
         }
     }
   }
+
+  // In case of touch input, increase strip brightness for the duration of the timer. Then decrease is again
+  // EVERY_N_MILLIS(100) {
+  //   for (int i = 0; i < NUM_STRIPS; i++) {
+  //     if (millis() - startTimers[i] < ACTION_TIMER *1000) {
+  //       if(gCurrentBrightness[i] < 250) {
+  //         gCurrentBrightness[i] += 5;
+  //       } 
+  //     } else {
+  //       if (gCurrentBrightness[i] > BRIGHTNESS) {
+  //         gCurrentBrightness[i] -= 1;
+  //       }
+  //     }
+  //   }
+  // }
  
   EVERY_N_MILLIS(1000/FRAMES_PER_SECOND) {
     for (int i = 0; i < 10; i++) {
-      static uint8_t startIndex = 0;
-      startIndex += 1;                                 // motion speed
-      nblendPaletteTowardPalette(currentPalettes[i], targetPalettes[i], 6);
-      // FillLEDsFromPaletteColors(startIndex);
-      // discostrobe();
+      nblendPaletteTowardPalette(currentPalettes[i], targetPalettes[i], 24);
+
+      // static uint8_t startIndex = 0;
+      // startIndex += 1;                                 // motion speed
+      plasma();
       // inoise8_fire();
-    // Fire2012WithPalette();
-    // controllers[i]->showLeds(gBrightness);
+      // Fire2012WithPalette();
+      // FillLEDsFromPaletteColors(startIndex);
+      // controllers[i]->showLeds(gCurrentBrightness[i]);
+      FastLED.show();
     }
   }
-  
-  EVERY_N_MILLISECONDS(50) {                                  // FastLED based non-blocking delay to update/display the sequence.
-    plasma();
-  }
-  FastLED.show();
+  // EVERY_N_MILLIS(500) {
+  //   for (int i = 0; i < NUM_STRIPS; i++){
+  //     Serial.print(touchSensorValues[i]);
+  //     Serial.print("  ");
+  //   }
+  //     Serial.println(""); 
+  // }
 }
 
 uint32_t xscale = 30;                                          // How far apart they are
@@ -216,170 +263,6 @@ void Fire2012WithPalette() {
       leds[pixelnumber] = color;
     }
 }
-
-void discostrobe()
-{
-  // First, we black out all the LEDs
-  fill_solid( leds, NUM_LEDS, CRGB::Black);
-
-  // To achive the strobe effect, we actually only draw lit pixels
-  // every Nth frame (e.g. every 4th frame).  
-  // sStrobePhase is a counter that runs from zero to kStrobeCycleLength-1,
-  // and then resets to zero.  
-  const uint8_t kStrobeCycleLength = 4; // light every Nth frame
-  static uint8_t sStrobePhase = 0;
-  sStrobePhase = sStrobePhase + 1;
-  if( sStrobePhase >= kStrobeCycleLength ) { 
-    sStrobePhase = 0; 
-  }
-
-  // We only draw lit pixels when we're in strobe phase zero; 
-  // in all the other phases we leave the LEDs all black.
-  if( sStrobePhase == 0 ) {
-
-    // The dash spacing cycles from 4 to 9 and back, 8x/min (about every 7.5 sec)
-    uint8_t dashperiod= beatsin8( 8/*cycles per minute*/, 4,10);
-    // The width of the dashes is a fraction of the dashperiod, with a minimum of one pixel
-    uint8_t dashwidth = (dashperiod / 4) + 1;
-    
-    // The distance that the dashes move each cycles varies 
-    // between 1 pixel/cycle and half-the-dashperiod/cycle.
-    // At the maximum speed, it's impossible to visually distinguish
-    // whether the dashes are moving left or right, and the code takes
-    // advantage of that moment to reverse the direction of the dashes.
-    // So it looks like they're speeding up faster and faster to the
-    // right, and then they start slowing down, but as they do it becomes
-    // visible that they're no longer moving right; they've been 
-    // moving left.  Easier to see than t o explain.
-    //
-    // The dashes zoom back and forth at a speed that 'goes well' with
-    // most dance music, a little faster than 120 Beats Per Minute.  You
-    // can adjust this for faster or slower 'zooming' back and forth.
-    uint8_t zoomBPM = ZOOMING_BEATS_PER_MINUTE;
-    int8_t  dashmotionspeed = beatsin8( (zoomBPM /2), 1,dashperiod);
-    // This is where we reverse the direction under cover of high speed
-    // visual aliasing.
-    if( dashmotionspeed >= (dashperiod/2)) { 
-      dashmotionspeed = 0 - (dashperiod - dashmotionspeed );
-    }
-
-    
-    // The hueShift controls how much the hue of each dash varies from 
-    // the adjacent dash.  If hueShift is zero, all the dashes are the 
-    // same color. If hueShift is 128, alterating dashes will be two
-    // different colors.  And if hueShift is range of 10..40, the
-    // dashes will make rainbows.
-    // Initially, I just had hueShift cycle from 0..130 using beatsin8.
-    // It looked great with very low values, and with high values, but
-    // a bit 'busy' in the middle, which I didnt like.
-    //   uint8_t hueShift = beatsin8(2,0,130);
-    //
-    // So instead I layered in a bunch of 'cubic easings'
-    // (see http://easings.net/#easeInOutCubic )
-    // so that the resultant wave cycle spends a great deal of time
-    // "at the bottom" (solid color dashes), and at the top ("two
-    // color stripes"), and makes quick transitions between them.
-    uint8_t cycle = beat8(2); // two cycles per minute
-    uint8_t easedcycle = ease8InOutCubic( ease8InOutCubic( cycle));
-    uint8_t wavecycle = cubicwave8( easedcycle);
-    uint8_t hueShift = scale8( wavecycle,130);
-
-
-    // Each frame of the animation can be repeated multiple times.
-    // This slows down the apparent motion, and gives a more static
-    // strobe effect.  After experimentation, I set the default to 1.
-    uint8_t strobesPerPosition = 1; // try 1..4
-
-
-    // Now that all the parameters for this frame are calculated,
-    // we call the 'worker' function that does the next part of the work.
-    discoWorker( dashperiod, dashwidth, dashmotionspeed, strobesPerPosition, hueShift);
-  }  
-}
-
-
-// discoWorker updates the positions of the dashes, and calls the draw function
-//
-void discoWorker( 
-    uint8_t dashperiod, uint8_t dashwidth, int8_t  dashmotionspeed,
-    uint8_t stroberepeats,
-    uint8_t huedelta)
- {
-  static uint8_t sRepeatCounter = 0;
-  static int8_t sStartPosition = 0;
-  static uint8_t sStartHue = 0;
-
-  // Always keep the hue shifting a little
-  sStartHue += 1;
-
-  // Increment the strobe repeat counter, and
-  // move the dash starting position when needed.
-  sRepeatCounter = sRepeatCounter + 1;
-  if( sRepeatCounter>= stroberepeats) {
-    sRepeatCounter = 0;
-    
-    sStartPosition = sStartPosition + dashmotionspeed;
-    
-    // These adjustments take care of making sure that the
-    // starting hue is adjusted to keep the apparent color of 
-    // each dash the same, even when the state position wraps around.
-    if( sStartPosition >= dashperiod ) {
-      while( sStartPosition >= dashperiod) { sStartPosition -= dashperiod; }
-      sStartHue  -= huedelta;
-    } else if( sStartPosition < 0) {
-      while( sStartPosition < 0) { sStartPosition += dashperiod; }
-      sStartHue  += huedelta;
-    }
-  }
-
-  // draw dashes with full brightness (value), and somewhat
-  // desaturated (whitened) so that the LEDs actually throw more light.
-  const uint8_t kSaturation = 208;
-  const uint8_t kValue = 255;
-
-  // call the function that actually just draws the dashes now
-  drawRainbowDashes( sStartPosition, NUM_LEDS-1, 
-                     dashperiod, dashwidth, 
-                     sStartHue, huedelta, 
-                     kSaturation, kValue);
-}
-
-
-// drawRainbowDashes - draw rainbow-colored 'dashes' of light along the led strip:
-//   starting from 'startpos', up to and including 'lastpos'
-//   with a given 'period' and 'width'
-//   starting from a given hue, which changes for each successive dash by a 'huedelta'
-//   at a given saturation and value.
-//
-//   period = 5, width = 2 would be  _ _ _ X X _ _ _ Y Y _ _ _ Z Z _ _ _ A A _ _ _ 
-//                                   \-------/       \-/
-//                                   period 5      width 2
-//
-static void drawRainbowDashes( 
-  uint8_t startpos, uint16_t lastpos, uint8_t period, uint8_t width, 
-  uint8_t huestart, uint8_t huedelta, uint8_t saturation, uint8_t value)
-{
-  uint8_t hue = huestart;
-  for( uint16_t i = startpos; i <= lastpos; i += period) {
-    // Switched from HSV color wheel to color palette
-    // Was: CRGB color = CHSV( hue, saturation, value); 
-    CRGBPalette16 gCurrentPalette = currentPalettes[i / NUM_LEDS_PER_STRIP];
-    CRGB color = ColorFromPalette( gCurrentPalette, hue, value, currentBlending);
-    
-    // draw one dash
-    uint16_t pos = i;
-    for( uint8_t w = 0; w < width; w++) {
-      leds[ pos ] = color;
-      pos++;
-      if( pos >= NUM_LEDS) {
-        break;
-      }
-    }
-    
-    hue += huedelta;
-  }
-}
-
 
 // Gradient Color Palette definitions for 33 different cpt-city color palettes.
 //    956 bytes of PROGMEM for all of the palettes together,
