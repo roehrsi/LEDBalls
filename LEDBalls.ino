@@ -14,7 +14,7 @@ using ace_sorting::shellSortKnuth;
 
 #define COLOR_ORDER GRB  // Order of RGB on your strips
 #define CHIPSET WS2811   // Select your LED chipset
-#define BRIGHTNESS 70    // Master brightness
+#define BRIGHTNESS 120    // Master brightness
 
 #define FRAMES_PER_SECOND 60  // The updates per second on the LED data
 
@@ -33,7 +33,6 @@ constexpr int touchPins[10] = { 4, 14, 2, 15, 13, 12, 14, 27, 33, 32 };  // ...a
                                                                          // IMPORTANT NOTE: GPIO0, while being touch capable in theory, is tied to boot button and led and is therefore not available on some boards.
 int gCurrentBrightness[NUM_STRIPS];
 TBlendType currentBlending = LINEARBLEND;
-uint8_t thisdelay = 20;
 
 // Forward declarations of an array of cpt-city gradient palettes, and
 // a count of how many there are.  The actual color palette definitions
@@ -43,7 +42,6 @@ extern const uint8_t gGradientPaletteCount;
 
 uint8_t gCurrentPaletteNumbers[10] = {};  // Current palette number from the 'playlist' of color palettes. One for each pin.
 bool gReverseDirection = true;            // For fire animation
-#define ZOOMING_BEATS_PER_MINUTE 61
 
 // Set up the palettes for each pin. Default to black. This is kinda ugly...
 CRGBPalette16 currentPalettes[10] = { CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black), CRGBPalette16(CRGB::Black),
@@ -129,43 +127,33 @@ void loop() {
     }
   }
 
-  // In case of touch input, increase strip brightness for the duration of the timer. Then decrease it again. This "flares up" the orb when touched
   EVERY_N_MILLIS(100) {
     for (int i = 0; i < NUM_STRIPS; i++) {
+      // In case of touch input, increase strip brightness for the duration of the timer. Then decrease it again. This "flares up" the orb when touched
       if (millis() - startTimers[i] < ACTION_TIMER * 1000) {
         if (gCurrentBrightness[i] < 250) {
           gCurrentBrightness[i] += 5;
         }
+      // Gradually lower the brightness of each strip down to the global level
       } else {
         if (gCurrentBrightness[i] > BRIGHTNESS) {
-          gCurrentBrightness[i] -= 5;
+          int b = (gCurrentBrightness[i] - BRIGHTNESS) / 5;
+          b = (b != 0) ? b : 1;
+          gCurrentBrightness[i] -= b;
         }
       }
     }
   }
 
-  // Keep blending palettes at a given framerate.
   // Run your animation routines here.
   EVERY_N_MILLIS(1000 / FRAMES_PER_SECOND) {
     for (int i = 0; i < 10; i++) {
+      // Keep blending palettes at a given framerate.
       nblendPaletteTowardPalette(currentPalettes[i], targetPalettes[i], 24);
-
-      // static uint8_t startIndex = 0;
-      // startIndex += 1;                                 // motion speed
+      
       plasma();
-      // inoise8_fire();
-      // Fire2012WithPalette();
-      // FillLEDsFromPaletteColors(startIndex);
     }
   }
-  // Control prints for touch sensor values.
-  // EVERY_N_MILLIS(500) {
-  //   for (int i = 0; i < NUM_STRIPS; i++){
-  //     Serial.print(touchSensorValues[i]);
-  //     Serial.print("  ");
-  //   }
-  //     Serial.println("");
-  // }
 
   // After each loop, draw all the controlled LEDs with their respective brightness.
   for (int i = 0; i < NUM_STRIPS; i++) {
